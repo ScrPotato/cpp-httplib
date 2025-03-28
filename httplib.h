@@ -307,7 +307,11 @@ using socket_t = int;
 #endif
 
 #ifdef CPPHTTPLIB_ZLIB_SUPPORT
+#ifdef CPPHTTPLB_ZLIB_SUPPORT_USE_MINIZ
+#include <miniz.h>
+#else
 #include <zlib.h>
+#endif
 #endif
 
 #ifdef CPPHTTPLIB_BROTLI_SUPPORT
@@ -4006,17 +4010,29 @@ inline bool nocompressor::compress(const char *data, size_t data_length,
 }
 
 #ifdef CPPHTTPLIB_ZLIB_SUPPORT
+
 inline gzip_compressor::gzip_compressor() {
   std::memset(&strm_, 0, sizeof(strm_));
   strm_.zalloc = Z_NULL;
   strm_.zfree = Z_NULL;
   strm_.opaque = Z_NULL;
 
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+  is_valid_ = mz_deflateInit2(&strm_, MZ_DEFAULT_COMPRESSION, MZ_DEFLATED, 31, 8,
+                              MZ_DEFAULT_STRATEGY) == MZ_OK;
+#else
   is_valid_ = deflateInit2(&strm_, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 31, 8,
                            Z_DEFAULT_STRATEGY) == Z_OK;
+#endif
 }
 
-inline gzip_compressor::~gzip_compressor() { deflateEnd(&strm_); }
+inline gzip_compressor::~gzip_compressor() {
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+  mz_deflateEnd(&strm_);
+#else
+  deflateEnd(&strm_);
+#endif
+}
 
 inline bool gzip_compressor::compress(const char *data, size_t data_length,
                                       bool last, Callback callback) {
@@ -4028,29 +4044,47 @@ inline bool gzip_compressor::compress(const char *data, size_t data_length,
 
     strm_.avail_in = static_cast<decltype(strm_.avail_in)>(
         (std::min)(data_length, max_avail_in));
-    strm_.next_in = const_cast<Bytef *>(reinterpret_cast<const Bytef *>(data));
+    strm_.next_in = const_cast<unsigned char *>(reinterpret_cast<const unsigned char *>(data));
 
     data_length -= strm_.avail_in;
     data += strm_.avail_in;
 
-    auto flush = (last && data_length == 0) ? Z_FINISH : Z_NO_FLUSH;
-    auto ret = Z_OK;
+    auto flush = (last && data_length == 0)
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+                     ? MZ_FINISH
+                     : MZ_NO_FLUSH;
+#else
+                     ? Z_FINISH
+                     : Z_NO_FLUSH;
+#endif
 
+    int ret = 0;
     std::array<char, CPPHTTPLIB_COMPRESSION_BUFSIZ> buff{};
     do {
       strm_.avail_out = static_cast<uInt>(buff.size());
-      strm_.next_out = reinterpret_cast<Bytef *>(buff.data());
+      strm_.next_out = reinterpret_cast<unsigned char *>(buff.data());
 
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+      ret = mz_deflate(&strm_, flush);
+      if (ret == MZ_STREAM_ERROR) { return false; }
+#else
       ret = deflate(&strm_, flush);
       if (ret == Z_STREAM_ERROR) { return false; }
+#endif
 
       if (!callback(buff.data(), buff.size() - strm_.avail_out)) {
         return false;
       }
     } while (strm_.avail_out == 0);
 
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+    assert((flush == MZ_FINISH && ret == MZ_STREAM_END) ||
+           (flush == MZ_NO_FLUSH && ret == MZ_OK));
+#else
     assert((flush == Z_FINISH && ret == Z_STREAM_END) ||
            (flush == Z_NO_FLUSH && ret == Z_OK));
+#endif
+
     assert(strm_.avail_in == 0);
   } while (data_length > 0);
 
@@ -4063,14 +4097,20 @@ inline gzip_decompressor::gzip_decompressor() {
   strm_.zfree = Z_NULL;
   strm_.opaque = Z_NULL;
 
-  // 15 is the value of wbits, which should be at the maximum possible value
-  // to ensure that any gzip stream can be decoded. The offset of 32 specifies
-  // that the stream type should be automatically detected either gzip or
-  // deflate.
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+  is_valid_ = mz_inflateInit2(&strm_, 32 + 15) == MZ_OK;
+#else
   is_valid_ = inflateInit2(&strm_, 32 + 15) == Z_OK;
+#endif
 }
 
-inline gzip_decompressor::~gzip_decompressor() { inflateEnd(&strm_); }
+inline gzip_decompressor::~gzip_decompressor() {
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+  mz_inflateEnd(&strm_);
+#else
+  inflateEnd(&strm_);
+#endif
+}
 
 inline bool gzip_decompressor::is_valid() const { return is_valid_; }
 
@@ -4078,7 +4118,7 @@ inline bool gzip_decompressor::decompress(const char *data, size_t data_length,
                                           Callback callback) {
   assert(is_valid_);
 
-  auto ret = Z_OK;
+  int ret = 0;
 
   do {
     constexpr size_t max_avail_in =
@@ -4086,37 +4126,55 @@ inline bool gzip_decompressor::decompress(const char *data, size_t data_length,
 
     strm_.avail_in = static_cast<decltype(strm_.avail_in)>(
         (std::min)(data_length, max_avail_in));
-    strm_.next_in = const_cast<Bytef *>(reinterpret_cast<const Bytef *>(data));
+    strm_.next_in = const_cast<unsigned char *>(reinterpret_cast<const unsigned char *>(data));
 
     data_length -= strm_.avail_in;
     data += strm_.avail_in;
 
     std::array<char, CPPHTTPLIB_COMPRESSION_BUFSIZ> buff{};
-    while (strm_.avail_in > 0 && ret == Z_OK) {
+    while (strm_.avail_in > 0
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+           && ret == MZ_OK
+#else
+           && ret == Z_OK
+#endif
+    ) {
       strm_.avail_out = static_cast<uInt>(buff.size());
-      strm_.next_out = reinterpret_cast<Bytef *>(buff.data());
+      strm_.next_out = reinterpret_cast<unsigned char *>(buff.data());
 
-      ret = inflate(&strm_, Z_NO_FLUSH);
-
-      assert(ret != Z_STREAM_ERROR);
-      switch (ret) {
-      case Z_NEED_DICT:
-      case Z_DATA_ERROR:
-      case Z_MEM_ERROR: inflateEnd(&strm_); return false;
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+      ret = mz_inflate(&strm_, MZ_NO_FLUSH);
+      assert(ret != MZ_STREAM_ERROR);
+      if (ret == MZ_NEED_DICT || ret == MZ_DATA_ERROR || ret == MZ_MEM_ERROR) {
+        mz_inflateEnd(&strm_);
+        return false;
       }
+#else
+      ret = inflate(&strm_, Z_NO_FLUSH);
+      assert(ret != Z_STREAM_ERROR);
+      if (ret == Z_NEED_DICT || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+        inflateEnd(&strm_);
+        return false;
+      }
+#endif
 
       if (!callback(buff.data(), buff.size() - strm_.avail_out)) {
         return false;
       }
     }
 
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT_USE_MINIZ
+    if (ret != MZ_OK && ret != MZ_STREAM_END) { return false; }
+#else
     if (ret != Z_OK && ret != Z_STREAM_END) { return false; }
+#endif
 
   } while (data_length > 0);
 
   return true;
 }
-#endif
+
+#endif  // CPPHTTPLIB_ZLIB_SUPPORT
 
 #ifdef CPPHTTPLIB_BROTLI_SUPPORT
 inline brotli_compressor::brotli_compressor() {
